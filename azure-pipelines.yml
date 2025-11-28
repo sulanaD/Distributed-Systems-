@@ -1,0 +1,61 @@
+# Azure Pipelines CI: build Docker images for frontend & backend and push to Docker Hub.
+# Triggers on pushes to main branch.
+# Set pipeline variables in Azure DevOps project: DOCKERHUB_USERNAME, DOCKERHUB_PASSWORD (secret), DOCKERHUB_NAMESPACE
+
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  # Build tag uses Azure DevOps build id
+  tag: '$(Build.BuildId)'
+  # namespace/username/org on Docker Hub (override in pipeline variables)
+  DOCKERHUB_NAMESPACE: 'sulanad'
+
+stages:
+- stage: Build
+  displayName: Build & Push
+  jobs:
+  - job: BuildAndPush
+    displayName: Build images and push
+    pool:
+      vmImage: 'ubuntu-latest'
+
+    steps:
+    - checkout: self
+
+    - script: |
+        set -e
+        echo "Building backend image..."
+        docker build --file backend/Dockerfile -t ${DOCKERHUB_NAMESPACE}/tax-system-backend:$(tag) backend
+        docker tag ${DOCKERHUB_NAMESPACE}/tax-system-backend:$(tag) ${DOCKERHUB_NAMESPACE}/tax-system-backend:latest
+
+        echo "Building frontend image..."
+        docker build --file frontend/Dockerfile -t ${DOCKERHUB_NAMESPACE}/tax-system-frontend:$(tag) frontend
+        docker tag ${DOCKERHUB_NAMESPACE}/tax-system-frontend:$(tag) ${DOCKERHUB_NAMESPACE}/tax-system-frontend:latest
+      displayName: Build Docker images
+
+    - script: |
+        set -e
+        if [ -z "${DOCKERHUB_USERNAME}" ] || [ -z "${DOCKERHUB_PASSWORD}" ]; then
+          echo "DOCKERHUB_USERNAME or DOCKERHUB_PASSWORD not set — skipping docker push."
+        else
+          echo "Logging into Docker Hub..."
+          echo "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+          echo "Pushing backend images..."
+          docker push ${DOCKERHUB_NAMESPACE}/tax-system-backend:$(tag)
+          docker push ${DOCKERHUB_NAMESPACE}/tax-system-backend:latest
+
+          echo "Pushing frontend images..."
+          docker push ${DOCKERHUB_NAMESPACE}/tax-system-frontend:$(tag)
+          docker push ${DOCKERHUB_NAMESPACE}/tax-system-frontend:latest
+        fi
+      displayName: Push images to Docker Hub
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Pipeline.Workspace)'
+        artifact: 'ci-output'
+      displayName: Publish pipeline artifact
