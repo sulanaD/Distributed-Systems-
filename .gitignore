@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+env/
+.venv/
+venv*/
+.Python
+
+# Pipenv / Poetry
+pipfile.lock
+poetry.lock
+
+# Virtualenv
+ENV/
+
+# Distribution/build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+**/Dockerfile
+**/.dockerignore
+
+# Node
+node_modules/
+
+# pytest
+.pytest_cache/
+
+# Database
+*.sqlite3
+
+# Misc
+coverage/

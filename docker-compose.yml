@@ -1,0 +1,65 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: tax-system-db
+    environment:
+      POSTGRES_DB: taxdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d taxdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tax-network
+
+  # Flask Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tax-system-backend
+    environment:
+      - FLASK_DEBUG=false
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=taxdb
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - JWT_SECRET_KEY=your-super-secret-key-change-in-production
+    ports:
+      - "5001:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - tax-network
+    restart: unless-stopped
+
+  # Nginx Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: tax-system-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - tax-network
+    restart: unless-stopped
+
+networks:
+  tax-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
