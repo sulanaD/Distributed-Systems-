@@ -1,65 +1,224 @@
 services:
   # PostgreSQL Database
-  db:
+  postgres:
     image: postgres:15-alpine
-    container_name: tax-system-db
+    container_name: banking-postgres
     environment:
-      POSTGRES_DB: taxdb
+      POSTGRES_DB: bankingdb
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d taxdb"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - tax-network
+      - banking-network
 
-  # Flask Backend API
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: banking-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - banking-network
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: banking-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - banking-network
+
+  # Kafka Message Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: banking-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - banking-network
+
+  # FastAPI Backend
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: tax-system-backend
-    environment:
-      - FLASK_DEBUG=false
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=taxdb
-      - DB_USER=postgres
-      - DB_PASSWORD=password
-      - JWT_SECRET_KEY=your-super-secret-key-change-in-production
-    ports:
-      - "5001:5000"
+    container_name: banking-backend
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: bankingdb
+      DB_USER: postgres
+      DB_PASSWORD: password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JWT_SECRET_KEY: "your-secret-key-change-in-production"
+      DEBUG: "True"
+      CORS_ORIGINS: "http://localhost,http://localhost:80,http://localhost:3000"
+    volumes:
+      - ./backend:/app
     networks:
-      - tax-network
+      - banking-network
     restart: unless-stopped
 
-  # Nginx Frontend
+  # React Frontend
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: tax-system-frontend
-    ports:
-      - "80:80"
+    container_name: banking-frontend
     depends_on:
       - backend
+    ports:
+      - "80:80"
+    environment:
+      VITE_API_URL: "http://localhost:8000"
     networks:
-      - tax-network
+      - banking-network
     restart: unless-stopped
 
-networks:
-  tax-network:
-    driver: bridge
+  # Audit Consumer - Writes all events to audit log
+  audit-consumer:
+    build:
+      context: .
+      dockerfile: consumers/Dockerfile
+    container_name: banking-audit-consumer
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    command: python consumers/audit_consumer.py
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: bankingdb
+      DB_USER: postgres
+      DB_PASSWORD: password
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    networks:
+      - banking-network
+    restart: unless-stopped
+
+  # Notification Consumer - Sends transaction notifications
+  notification-consumer:
+    build:
+      context: .
+      dockerfile: consumers/Dockerfile
+    container_name: banking-notification-consumer
+    depends_on:
+      kafka:
+        condition: service_started
+    command: python consumers/notification_consumer.py
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    networks:
+      - banking-network
+    restart: unless-stopped
+
+  # Analytics Consumer - Real-time transaction analytics
+  analytics-consumer:
+    build:
+      context: .
+      dockerfile: consumers/Dockerfile
+    container_name: banking-analytics-consumer
+    depends_on:
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    command: python consumers/analytics_consumer.py
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    networks:
+      - banking-network
+    restart: unless-stopped
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: banking-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - banking-network
+    restart: unless-stopped
+
+  # Grafana Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: banking-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - banking-network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  banking-network:
+    driver: bridge
